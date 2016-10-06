@@ -16,9 +16,15 @@ my $remoteUser = "wolke";
 my $remoteHost = "wolke-nuc";
 
 my $backupDir = "~/backup-n9";
+my $dcimDir = "/home/user/MyDocs/DCIM";
+
+my $billboardFile = "/home/user/.cache/billboard_02_backup.txt";
+my $lastSuccessFile = "/home/user/.cache/backup-last-success";
 
 sub ensureConnection($);
 sub getLocalPort($);
+sub getDCIMSummary();
+sub billboardMsg($);
 sub sshCmd($@);
 sub rsyncCmd($$$);
 sub readSecrets();
@@ -27,30 +33,49 @@ sub tryRun(@);
 sub readProc(@);
 sub tryReadProc(@);
 sub tryReadProcQuiet(@);
+sub nowHrMin();
+sub fail($);
 
 sub main(@){
+  run "date";
   run "bat";
 
+  ######
+  billboardMsg sprintf "BAK-CNXN: %s", nowHrMin();
   my $config = readSecrets();
   run "sudo", "screen-cmd", "-q", "revtun", "-r", "--unsafe", "--local";
   run "sudo", "screen-cmd", "revtun", "-r", "--unsafe", "--local";
   ensureConnection($config);
-
   run sshCmd($config, "mkdir", "-p", $backupDir);
+  ######
 
-  run rsyncCmd($config, "/home/user/MyDocs/DCIM/", "$backupDir/DCIM"),
+  ######
+  billboardMsg sprintf "BAK-DCIM: %s %s", getDCIMSummary(), nowHrMin();
+  run rsyncCmd($config, "$dcimDir/", "$backupDir/DCIM"),
     "--exclude=/*/";
+  ######
 
+  ######
+  billboardMsg sprintf "BAK-CALL: %s", nowHrMin();
   my $callFile = "/tmp/backup-call-tmp";
   run "backup-comm-n9e", "call", $callFile;
   run rsyncCmd($config, $callFile, $backupDir);
+  ######
 
+  ######
+  billboardMsg sprintf "BAK-SMS : %s", nowHrMin();
   my $smsFile = "/tmp/backup-sms-tmp";
   run "backup-comm-n9e", "sms", $smsFile;
   run rsyncCmd($config, $smsFile, $backupDir);
+  #######
 
+  ######
+  billboardMsg sprintf "%28s", "b\@" . nowHrMin();
   run "sudo", "screen-cmd", "-q", "revtun", "--unsafe", "--local";
+  system "echo " . nowHrMin() . " > $lastSuccessFile";
+  ######
 
+  run "date";
   run "bat";
 }
 
@@ -72,18 +97,50 @@ sub ensureConnection($){
     my @hostnameCmd = sshCmd($config, "hostname");
     $host = tryReadProc @hostnameCmd;
   }
-  die "Failed to connect to $remoteHost\n" if $host ne $remoteHost;
+  fail "Failed to connect to $remoteHost\n" if $host ne $remoteHost;
   print "connected!\n";
 }
 
 sub getLocalPort($){
   my $config = shift;
   my $file = $$config{'revtun.portfile'};
-  die "missing revtun.portfile: $file\n" if not -f $file;
+  fail "missing revtun.portfile: $file\n" if not -f $file;
   my $port = `cat $file`;
   chomp $port;
-  die "malformed port: $port\n" if $port !~ /^\d+$/;
+  fail "malformed port: $port\n" if $port !~ /^\d+$/;
   return $port;
+}
+
+sub getDCIMSummary(){
+  my $dcimSizeMiB;
+  my $dcimDu = `du -bc $dcimDir/*.* 2>/dev/null | tail -1`;
+  if($dcimDu =~ /^(\d+)\s*total$/){
+    $dcimSizeMiB = int($1/1024/1024 + 0.5) . "M";
+  }else{
+    $dcimSizeMiB = "???";
+  }
+
+  my $dcimCount = `ls $dcimDir/*.* 2>/dev/null | wc -l`;
+  chomp $dcimCount;
+  $dcimCount = "???" unless $dcimCount =~ /^\d+$/;
+
+  return sprintf "%03dM %03df", $dcimSizeMiB, $dcimCount;
+}
+
+sub billboardMsg($){
+  my ($msg) = @_;
+  if(not defined $msg or $msg =~ /^\s*$/){
+    run "rm", "-f", $billboardFile;
+  }else{
+    $msg =~ s/\n+$//;
+    $msg =~ s/\n/ /g;
+    $msg = "$msg\n";
+
+    open FH, "> $billboardFile" or fail "Could not write $billboardFile: $!\n";
+    print FH $msg;
+    close FH;
+  }
+  run "billboard-refresh";
 }
 
 sub sshCmd($@){
@@ -114,14 +171,14 @@ sub readSecrets(){
     }
   }
   for my $key(sort @configKeys){
-    die "Missing config '$key' in $secretsFile\n" if not defined $$cfg{$key};
+    fail "Missing config '$key' in $secretsFile\n" if not defined $$cfg{$key};
   }
   return $cfg;
 }
 
 sub run(@){
   tryRun @_;
-  die "Error running @_\n" if $? != 0;
+  fail "Error running @_\n" if $? != 0;
 }
 
 sub tryRun(@){
@@ -131,7 +188,7 @@ sub tryRun(@){
 
 sub readProc(@){
   my $out = tryReadProc @_;
-  die "Error running @_\n" if $? != 0;
+  fail "Error running @_\n" if $? != 0;
   return $out;
 }
 
@@ -147,6 +204,22 @@ sub tryReadProcQuiet(@){
   my $out = join '', @lines;
   chomp $out if @lines == 1;
   return $out;
+}
+sub nowHrMin(){
+  my $hrMin = `date +%H:%M`;
+  chomp $hrMin;
+  return $hrMin;
+}
+
+sub fail($){
+  my ($msg) = @_;
+  chomp $msg;
+
+  my $lastSuccess = `cat $lastSuccessFile 2>/dev/null`;
+  my $now = nowHrMin;
+  billboardMsg sprintf "%28s", "!$now \@b$lastSuccess";
+
+  die "$msg\n";
 }
 
 &main(@ARGV);
